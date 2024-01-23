@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use std::env;
 
 lazy_static! {
-    static ref REGEX_LIST: Vec<Regex> = vec![
+    static ref REGEX_CLEANUP_LIST: Vec<Regex> = vec![
         // Spanish
         // https://github.com/KBlixt/subcleaner/blob/master/regex_profiles/default/spanish.conf
         Regex::new(r"\b(creado(s)?|subtitu(lo|los|lado|lada|lados)|subtítu(lo|los|lado|lada|lados)|descarg(ado|ar)|(re-?)?sinc(ed|ro(nizado|nizados|nizacion|nización)?)?|modific(ado|ados|ion|iones|ión|iónes)|traduc(e|ido|idos|tora|cion|ciones|ción|ciónes)|correcc(iones|ion|ión|iónes)|correg(ir|ido|idos)|transcri(bido|pcion|pciones|pción|pciónes)|mejor(ado|amientos)|adaptado|ripeo|arreglos|subs|hecha)\W*(por|de|by)?\W*(:|;)\b").expect("Invalid regex"),
@@ -44,6 +44,8 @@ lazy_static! {
         Regex::new(r"\b(admit1\.app|4kvod\.tv)\b").expect("Invalid regex"),
         // Add more patterns as needed
     ];
+    static ref REGEX_TIMESTAMP: Regex = 
+        Regex::new(r"(?:\d+).*\s+-->\s+[0-5]{2}:.*$").expect("Invalid regex");
 }
 
 
@@ -53,18 +55,15 @@ fn detect_encoding(data: &[u8]) -> &'static encoding_rs::Encoding {
     detector.guess(None, true)
 }
 
-fn process_line(line: &str, regex_list: &[Regex]) -> bool {
-    let mut any_match = false;
-    for regex in regex_list {
-        if regex.is_match(line) {
-            println!("Matched line: {}", line);
-            any_match = true;
-        }
-    }
-    any_match
+fn trash_match(line: &str) -> bool {
+    REGEX_CLEANUP_LIST.iter().any(|regex| regex.is_match(line))
 }
 
-fn convert_to_utf8(input_path: &str, output_path: &str) -> io::Result<()> {
+fn timestamp_match(line: &str) -> bool {
+    REGEX_TIMESTAMP.is_match(line)
+}
+
+fn process_subtitle(input_path: &str, output_path: &str) -> io::Result<()> {
     let mut content = Vec::new();
     File::open(input_path)?.read_to_end(&mut content)?;
 
@@ -75,10 +74,48 @@ fn convert_to_utf8(input_path: &str, output_path: &str) -> io::Result<()> {
     let output_file = File::create(output_path)?;
     let mut output_writer = io::BufWriter::new(output_file);
 
-    for line in BufReader::new(decoded.as_bytes()).lines() {
+    let mut block_to_write = Some(String::new());
+    let mut block_counter = 1;
+    let mut regex_match_detected = false;
+
+    for (i, line) in BufReader::new(decoded.as_bytes()).lines().enumerate() {
         let line = line?;
-        process_line(&line, &REGEX_LIST);
-        writeln!(output_writer, "{}", line)?;
+
+        if !line.is_empty() && regex_match_detected {
+            continue
+        };
+
+        if !line.is_empty() && line.chars().all(|c| c.is_numeric()) {
+            // needs !line.is_empty, otherwise is_numeric matches an empty line
+            continue;
+        };
+
+        if line.is_empty() && regex_match_detected {
+            regex_match_detected = false;
+            continue;
+        };
+
+        if line.is_empty() && block_to_write.is_none() {
+            continue
+        }
+
+        if line.is_empty() {
+            writeln!(output_writer, "{}", block_counter)?;
+            writeln!(output_writer, "{}", block_to_write.unwrap())?;
+            block_counter += 1;
+            block_to_write = Some(String::new());
+            continue
+        }
+
+        if !timestamp_match(&line) && trash_match(&line) {
+            regex_match_detected = true;
+            // clean block_to_write
+            block_to_write = Some(String::new());
+            println!("Line {} matches pattern", i + 1);
+        } else {
+            block_to_write.as_mut().unwrap().push_str(&line);
+            block_to_write.as_mut().unwrap().push('\n');
+        }
     }
 
     Ok(())
@@ -88,21 +125,18 @@ fn main() {
     // Collect command line arguments
     let args: Vec<String> = env::args().collect();
 
-    // Check if enough arguments are provided
     if args.len() != 3 {
         eprintln!("Usage: {} <input_path> <output_path>", args[0]);
         std::process::exit(1);
     }
 
-    // Get input and output paths from command line arguments
     let input_path = &args[1];
     let output_path = &args[2];
 
-    // Call the convert_to_utf8 function with the provided paths
-    if let Err(err) = convert_to_utf8(input_path, output_path) {
+    if let Err(err) = process_subtitle(input_path, output_path) {
         eprintln!("Error: {}", err);
     } else {
-        println!("File converted successfully!");
+        println!("Subtitle cleaned successfully!");
     }
 }
 
